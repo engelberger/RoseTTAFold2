@@ -9,7 +9,6 @@ from Attention_module import Attention, FeedForwardLayer, AttentionWithBias
 from Track_module import PairStr2Pair
 
 # Module contains classes and functions to generate initial embeddings
-
 # Function to calculate the cyclic offset for a given length of amino acid sequence with print statements.
 def cyclic_offset(L):
     i = np.arange(L)  # Create an array of sequence positions.
@@ -82,14 +81,6 @@ class MSA_emb(nn.Module):
         nn.init.zeros_(self.emb.bias)  # Set biases to zero.
 
     def forward(self, msa, seq, idx, symmids=None):
-        # Inputs:
-        #   - msa: Input MSA (B, N, L, d_init)
-        #   - seq: Input Sequence (B, L)
-        #   - idx: Residue index
-        # Outputs:
-        #   - msa: Initial MSA embedding (B, N, L, d_msa)
-        #   - pair: Initial Pair embedding (B, L, L, d_pair)
-
         B, N, L = msa.shape[:3]  # Get batch size, number of sequences in MSA, and sequence length.
 
         # MSA embedding.
@@ -102,7 +93,11 @@ class MSA_emb(nn.Module):
         right = self.emb_right(seq)[:, :, None]  # Embed the right positions of the pair.
         pair = left + right  # Combine left and right embeddings.
         pair = pair + self.pos(idx)  # Add relative position encoding with cyclic offset if enabled.
-        return msa, pair,state
+
+        # State embedding.
+        state = self.emb_state(seq)  # Embed the state information.
+
+        return msa, pair, state
 
 class Extra_emb(nn.Module):
     # Get initial seed MSA embedding
