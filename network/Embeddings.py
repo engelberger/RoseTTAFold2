@@ -9,55 +9,77 @@ from Attention_module import Attention, FeedForwardLayer, AttentionWithBias
 from Track_module import PairStr2Pair
 
 # Module contains classes and functions to generate initial embeddings
-class PositionalEncoding2D(nn.Module):
-    # Add relative positional encoding to pair features
-    def __init__(self, d_model, minpos=-32, maxpos=32):
-        super(PositionalEncoding2D, self).__init__()
-        self.minpos = minpos
-        self.maxpos = maxpos
-        self.nbin = abs(minpos)+maxpos+1
-        self.emb = nn.Embedding(self.nbin, d_model)
-        #self.emb_chain = nn.Embedding(2, d_model)
+
+# Function to calculate the cyclic offset for a given length of amino acid sequence with print statements.
+def cyclic_offset(L):
+    i = np.arange(L)  # Create an array of sequence positions.
+    ij = np.stack([i, i + L], -1)  # Stack the positions to create pairs for N and C termini connection.
+    offset = i[:, None] - i[None, :]  # Calculate the direct offset between positions.
+    c_offset = np.abs(ij[:, None, :, None] - ij[None, :, None, :]).min((2, 3))  # Calculate the cyclic offset.
+    a = c_offset < np.abs(offset)  # Identify where the cyclic offset is smaller than the direct offset.
+    c_offset[a] = -c_offset[a]  # Apply a bug fix, flipping the sign of the cyclic offset when needed.
+    cyclic_offset_matrix = c_offset * np.sign(offset)  # Return the cyclic offset with the correct sign.
     
+    # Print the cyclic offset matrix for verification.
+    print("Cyclic offset matrix:\n", cyclic_offset_matrix)
+    
+    return cyclic_offset_matrix
+
+# Positional encoding class with cyclic offset strategy and print statements.
+class PositionalEncoding2D(nn.Module):
+    def __init__(self, d_pair, minpos=-32, maxpos=32, cyclic=True):
+        super(PositionalEncoding2D, self).__init__()
+        self.cyclic = cyclic  # Flag to indicate if cyclic offset is used.
+        self.d_pair = d_pair  # Dimension of the pair embedding.
+        # Create a learnable parameter for positional encoding.
+        self.pos_embedding = nn.Parameter(torch.randn(2 * maxpos + 1, d_pair))
+
     def forward(self, idx):
-        B, L = idx.shape[:2]
+        if self.cyclic:
+            # Calculate cyclic offset for the given sequence length.
+            L = idx.size(1)
+            offset = torch.from_numpy(cyclic_offset(L)).to(idx.device)
+        else:
+            # Calculate direct offset for non-cyclic case.
+            offset = idx[:, None] - idx[None, :]
 
-        bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
+        # Print the offset matrix before clamping for verification.
+        print("Offset matrix before clamping:\n", offset)
 
-        seqsep = torch.full((B,L,L),100, device=idx.device)
-        seqsep[0] = idx[0,None,:] - idx[0,:,None] # (B, L, L)
+        # Clamp the offset values to be within the range of the positional encoding.
+        offset_clamped = torch.clamp(offset + maxpos, minpos, maxpos)
+        
+        # Print the clamped offset matrix for verification.
+        print("Offset matrix after clamping:\n", offset_clamped)
 
-        #
-        ib = torch.bucketize(seqsep, bins).long() # (B, L, L)
-        emb = self.emb(ib) #(B, L, L, d_model)
-        #emb_c = self.emb_chain(same_chain.long())
-        return emb #+ emb_c
+        # Use the offset to index into the positional encoding.
+        pos_enc = self.pos_embedding[offset_clamped.long()]
+        return pos_enc
 
+# Initial MSA embedding module with cyclic offset strategy.
 class MSA_emb(nn.Module):
-    # Get initial seed MSA embedding
     def __init__(self, d_msa=256, d_pair=128, d_state=32, d_init=22+22+2+2,
-                 minpos=-32, maxpos=32, p_drop=0.1):
+                 minpos=-32, maxpos=32, p_drop=0.1, cyclic=True):
         super(MSA_emb, self).__init__()
-        self.emb = nn.Linear(d_init, d_msa) # embedding for general MSA
-        self.emb_q = nn.Embedding(22, d_msa) # embedding for query sequence -- used for MSA embedding
-        self.emb_left = nn.Embedding(22, d_pair) # embedding for query sequence -- used for pair embedding
-        self.emb_right = nn.Embedding(22, d_pair) # embedding for query sequence -- used for pair embedding
-        self.emb_state = nn.Embedding(22, d_state)
-        self.pos = PositionalEncoding2D(d_pair, minpos=minpos, maxpos=maxpos)
+        self.emb = nn.Linear(d_init, d_msa)  # Linear layer for general MSA embedding.
+        self.emb_q = nn.Embedding(22, d_msa)  # Embedding layer for query sequence (MSA embedding).
+        self.emb_left = nn.Embedding(22, d_pair)  # Embedding layer for left position (pair embedding).
+        self.emb_right = nn.Embedding(22, d_pair)  # Embedding layer for right position (pair embedding).
+        self.emb_state = nn.Embedding(22, d_state)  # Embedding layer for state information.
+        self.pos = PositionalEncoding2D(d_pair, minpos=minpos, maxpos=maxpos, cyclic=cyclic)  # Positional encoding with cyclic offset.
 
         self.d_init = d_init
         self.d_msa = d_msa
-
         self.reset_parameter()
-    
-    def reset_parameter(self):
-        self.emb = init_lecun_normal(self.emb)
-        self.emb_q = init_lecun_normal(self.emb_q)
-        self.emb_left = init_lecun_normal(self.emb_left)
-        self.emb_right = init_lecun_normal(self.emb_right)
-        self.emb_state = init_lecun_normal(self.emb_state)
 
-        nn.init.zeros_(self.emb.bias)
+    def reset_parameter(self):
+        # Initialize parameters using LeCun normal initialization.
+        nn.init.kaiming_normal_(self.emb.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.kaiming_normal_(self.emb_q.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.kaiming_normal_(self.emb_left.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.kaiming_normal_(self.emb_right.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.kaiming_normal_(self.emb_state.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.zeros_(self.emb.bias)  # Set biases to zero.
 
     def forward(self, msa, seq, idx, symmids=None):
         # Inputs:
@@ -68,23 +90,19 @@ class MSA_emb(nn.Module):
         #   - msa: Initial MSA embedding (B, N, L, d_msa)
         #   - pair: Initial Pair embedding (B, L, L, d_pair)
 
-        B, N, L = msa.shape[:3] # number of sequenes in MSA
+        B, N, L = msa.shape[:3]  # Get batch size, number of sequences in MSA, and sequence length.
 
-        # msa embedding 
-        msa = self.emb(msa) # (B, N, L, d_model) # MSA embedding
-        tmp = self.emb_q(seq).unsqueeze(1) # (B, 1, L, d_model) -- query embedding
-        msa = msa + tmp.expand(-1, N, -1, -1) # adding query embedding to MSA
+        # MSA embedding.
+        msa = self.emb(msa)  # Apply linear embedding to MSA.
+        tmp = self.emb_q(seq).unsqueeze(1)  # Embed the query sequence and unsqueeze to match MSA dimensions.
+        msa = msa + tmp.expand(-1, N, -1, -1)  # Add query embedding to MSA.
 
-        # pair embedding 
-        left = self.emb_left(seq)[:,None] # (B, 1, L, d_pair)
-        right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
-        pair = (left + right) # (B, L, L, d_pair)
-        pair = pair + self.pos(idx) # add relative position
-
-        # state embedding
-        state = self.emb_state(seq) #.repeat(oligo,1,1)
-
-        return msa, pair, state
+        # Pair embedding.
+        left = self.emb_left(seq)[:, None]  # Embed the left positions of the pair.
+        right = self.emb_right(seq)[:, :, None]  # Embed the right positions of the pair.
+        pair = left + right  # Combine left and right embeddings.
+        pair = pair + self.pos(idx)  # Add relative position encoding with cyclic offset if enabled.
+        return msa, pair,state
 
 class Extra_emb(nn.Module):
     # Get initial seed MSA embedding
