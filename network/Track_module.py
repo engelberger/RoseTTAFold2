@@ -18,23 +18,44 @@ from symmetry import get_symm_map
 # 4. Str -> Str update (node from MSA, edge from Pair)
 
 # Module contains classes and functions to generate initial embeddings
+# Module contains classes and functions to generate initial embeddings
+
+# Function to calculate the cyclic offset for a given length of amino acid sequence.
+def cyclic_offset(L):
+    i = np.arange(L)  # Create an array of sequence positions.
+    ij = np.stack([i, i + L], -1)  # Stack the positions to create pairs for N and C termini connection.
+    offset = i[:, None] - i[None, :]  # Calculate the direct offset between positions.
+    c_offset = np.abs(ij[:, None, :, None] - ij[None, :, None, :]).min((2, 3))  # Calculate the cyclic offset.
+    a = c_offset < np.abs(offset)  # Identify where the cyclic offset is smaller than the direct offset.
+    c_offset[a] = -c_offset[a]  # Apply a bug fix, flipping the sign of the cyclic offset when needed.
+    cyclic_offset_matrix = c_offset * np.sign(offset)  # Return the cyclic offset with the correct sign.
+    return cyclic_offset_matrix
+
 class SeqSep(nn.Module):
-    # Add relative positional encoding to pair features
-    def __init__(self, d_model, minpos=-32, maxpos=32):
+    # Add relative positional encoding to pair features with cyclic offset strategy
+    def __init__(self, d_model, minpos=-32, maxpos=32, cyclic=True):
         super(SeqSep, self).__init__()
         self.minpos = minpos
         self.maxpos = maxpos
-        self.nbin = abs(minpos)+maxpos+1
+        self.nbin = abs(minpos) + maxpos + 1
         self.emb = nn.Embedding(self.nbin, d_model)
+        self.cyclic = cyclic  # Flag to indicate if cyclic offset is used.
     
     def forward(self, idx, oligo=1):
         B, L = idx.shape[:2]
         bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
-        seqsep = torch.full((oligo,L,L), 100, dtype=idx.dtype, device=idx.device)
-        seqsep[0] = idx[:,None,:] - idx[:,:,None] # (B, L, L)
-        #
-        ib = torch.bucketize(seqsep, bins).long() # (B, L, L)
-        emb = self.emb(ib) #(B, L, L, d_model)
+        seqsep = torch.full((oligo, L, L), 100, dtype=idx.dtype, device=idx.device)
+        
+        if self.cyclic:
+            # Calculate cyclic offset for the given sequence length.
+            offset_np = cyclic_offset(L)
+            offset = torch.from_numpy(offset_np).to(idx.device)
+            seqsep[0] = offset  # Use cyclic offset.
+        else:
+            seqsep[0] = idx[:, None, :] - idx[:, :, None]  # Direct offset (non-cyclic).
+        
+        ib = torch.bucketize(seqsep, bins).long()  # Bucketize the offsets.
+        emb = self.emb(ib)  # Get embeddings for the offsets.
         return emb
 
 # Update MSA with biased self-attention. bias from Pair & Str
@@ -521,12 +542,13 @@ class IterBlock(nn.Module):
                  n_head_msa=8, n_head_pair=4,
                  use_global_attn=False,
                  d_hidden=32, d_hidden_msa=None, p_drop=0.15,
-                 SE3_param={'l0_in_features':32, 'l0_out_features':16, 'num_edge_features':32}):
+                 SE3_param={'l0_in_features':32, 'l0_out_features':16, 'num_edge_features':32},
+                 cyclic=True):  # Add cyclic parameter
         super(IterBlock, self).__init__()
         if d_hidden_msa == None:
             d_hidden_msa = d_hidden
 
-        self.pos = SeqSep(d_rbf)
+        self.pos = SeqSep(d_rbf, cyclic=cyclic)  # Initialize SeqSep with cyclic offset.
         self.msa2msa = MSAPairStr2MSA(d_msa=d_msa, d_pair=d_pair,
                                       n_head=n_head_msa,
                                       d_state=SE3_param['l0_out_features'],

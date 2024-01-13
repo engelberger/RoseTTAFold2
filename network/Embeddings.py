@@ -7,9 +7,10 @@ from util import get_Cb
 from util_module import Dropout, create_custom_forward, rbf, init_lecun_normal
 from Attention_module import Attention, FeedForwardLayer, AttentionWithBias
 from Track_module import PairStr2Pair
+import numpy as np
+import matplotlib.pyplot as plt
 
-# Module contains classes and functions to generate initial embeddings
-# Function to calculate the cyclic offset for a given length of amino acid sequence with print statements.
+# Function to calculate the cyclic offset for a given length of amino acid sequence.
 def cyclic_offset(L):
     i = np.arange(L)  # Create an array of sequence positions.
     ij = np.stack([i, i + L], -1)  # Stack the positions to create pairs for N and C termini connection.
@@ -18,39 +19,43 @@ def cyclic_offset(L):
     a = c_offset < np.abs(offset)  # Identify where the cyclic offset is smaller than the direct offset.
     c_offset[a] = -c_offset[a]  # Apply a bug fix, flipping the sign of the cyclic offset when needed.
     cyclic_offset_matrix = c_offset * np.sign(offset)  # Return the cyclic offset with the correct sign.
-    
     # Print the cyclic offset matrix for verification.
-    print("Cyclic offset matrix:\n", cyclic_offset_matrix)
-    
+    print("Cyclic offset matrix:")
+    print(cyclic_offset_matrix)
+
+    # Plot the cyclic offset matrix.
+    plt.imshow(cyclic_offset_matrix, cmap='viridis')
+    plt.colorbar(label='Offset')
+    plt.title('Cyclic Offset Matrix')
+    plt.xlabel('Position j')
+    plt.ylabel('Position i')
+    plt.show()
     return cyclic_offset_matrix
 
 # Positional encoding class with cyclic offset strategy and print statements.
 class PositionalEncoding2D(nn.Module):
     def __init__(self, d_pair, minpos=-32, maxpos=32, cyclic=True):
         super(PositionalEncoding2D, self).__init__()
+        self.minpos = minpos
+        self.maxpos = maxpos
         self.cyclic = cyclic  # Flag to indicate if cyclic offset is used.
         self.d_pair = d_pair  # Dimension of the pair embedding.
         # Create a learnable parameter for positional encoding.
         self.pos_embedding = nn.Parameter(torch.randn(2 * maxpos + 1, d_pair))
-
+    
     def forward(self, idx):
         if self.cyclic:
             # Calculate cyclic offset for the given sequence length.
             L = idx.size(1)
-            offset = torch.from_numpy(cyclic_offset(L)).to(idx.device)
+            offset_np = cyclic_offset(L)
+            offset = torch.from_numpy(offset_np).to(idx.device)
         else:
             # Calculate direct offset for non-cyclic case.
             offset = idx[:, None] - idx[None, :]
 
-        # Print the offset matrix before clamping for verification.
-        print("Offset matrix before clamping:\n", offset)
-
         # Clamp the offset values to be within the range of the positional encoding.
-        offset_clamped = torch.clamp(offset + maxpos, minpos, maxpos)
+        offset_clamped = torch.clamp(offset + self.maxpos, self.minpos, self.maxpos)
         
-        # Print the clamped offset matrix for verification.
-        print("Offset matrix after clamping:\n", offset_clamped)
-
         # Use the offset to index into the positional encoding.
         pos_enc = self.pos_embedding[offset_clamped.long()]
         return pos_enc
