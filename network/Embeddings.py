@@ -8,6 +8,26 @@ from util_module import Dropout, create_custom_forward, rbf, init_lecun_normal
 from Attention_module import Attention, FeedForwardLayer, AttentionWithBias
 from Track_module import PairStr2Pair
 
+
+
+def calculate_wrapped_relative_positions(seq_length, minpos, maxpos):
+    idx = torch.arange(seq_length, device='cuda' or 'cpu')
+    relative_positions = idx[None, :] - idx[:, None]  # Standard relative positions (L, L)
+    # Wrap the relative positions for cyclic peptides
+    wrapped_relative_positions = torch.remainder(relative_positions + seq_length, seq_length)
+    wrapped_relative_positions = torch.where(
+        wrapped_relative_positions > maxpos,
+        wrapped_relative_positions - seq_length,
+        wrapped_relative_positions
+    )
+    return wrapped_relative_positions
+
+def bucketize_relative_positions(relative_positions, bins):
+    # Bucketize the relative positions
+    ib = torch.bucketize(relative_positions, bins).long() - (abs(minpos) + 1)  # Adjust indices for embedding lookup
+    return ib
+
+
 # Module contains classes and functions to generate initial embeddings
 class PositionalEncoding2D(nn.Module):
     # Add relative positional encoding to pair features
@@ -19,7 +39,7 @@ class PositionalEncoding2D(nn.Module):
         self.emb = nn.Embedding(self.nbin, d_model)
         #self.emb_chain = nn.Embedding(2, d_model)
     
-    def forward(self, idx):
+    def _forward(self, idx):
         B, L = idx.shape[:2]
 
         bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
@@ -32,6 +52,17 @@ class PositionalEncoding2D(nn.Module):
         emb = self.emb(ib) #(B, L, L, d_model)
         #emb_c = self.emb_chain(same_chain.long())
         return emb #+ emb_c
+    
+    def forward(self, idx):
+        B, L = idx.shape[:2]
+        # Calculate wrapped relative positions for cyclic peptides
+        wrapped_relative_positions = calculate_wrapped_relative_positions(L, self.minpos, self.maxpos)
+        # Bucketize relative positions
+        ib = bucketize_relative_positions(wrapped_relative_positions, bins)
+        # Lookup embeddings
+        emb = self.emb(ib)  # (L, L, d_model)
+        return emb
+
 
 class MSA_emb(nn.Module):
     # Get initial seed MSA embedding
@@ -59,7 +90,7 @@ class MSA_emb(nn.Module):
 
         nn.init.zeros_(self.emb.bias)
 
-    def forward(self, msa, seq, idx, symmids=None):
+    def _forward(self, msa, seq, idx, symmids=None):
         # Inputs:
         #   - msa: Input MSA (B, N, L, d_init)
         #   - seq: Input Sequence (B, L)
@@ -80,6 +111,43 @@ class MSA_emb(nn.Module):
         right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
         pair = (left + right) # (B, L, L, d_pair)
         pair = pair + self.pos(idx) # add relative position
+
+        # state embedding
+        state = self.emb_state(seq) #.repeat(oligo,1,1)
+
+        return msa, pair, state
+    
+    def forward(self, msa, seq, idx, symmids=None):
+        # Inputs:
+        #   - msa: Input MSA (B, N, L, d_init)
+        #   - seq: Input Sequence (B, L)
+        #   - idx: Residue index
+        # Outputs:
+        #   - msa: Initial MSA embedding (B, N, L, d_msa)
+        #   - pair: Initial Pair embedding (B, L, L, d_pair)
+
+        B, N, L = msa.shape[:3] # number of sequenes in MSA
+
+        # msa embedding 
+        msa = self.emb(msa) # (B, N, L, d_model) # MSA embedding
+        tmp = self.emb_q(seq).unsqueeze(1) # (B, 1, L, d_model) -- query embedding
+        msa = msa + tmp.expand(-1, N, -1, -1) # adding query embedding to MSA
+
+        # pair embedding 
+        left = self.emb_left(seq)[:,None] # (B, 1, L, d_pair)
+        right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
+        pair = (left + right) # (B, L, L, d_pair)
+
+        # Calculate wrapped relative positions for cyclic peptides
+        wrapped_relative_positions = calculate_wrapped_relative_positions(L, self.pos.minpos, self.pos.maxpos)
+        # Bucketize relative positions
+        ib = bucketize_relative_positions(wrapped_relative_positions, bins)
+        # Lookup embeddings
+        pos_emb = self.pos.emb(ib)  # (L, L, d_pair)
+
+        # Add positional encodings to pair embeddings
+        pair = pair + pos_emb  # Add relative position
+
 
         # state embedding
         state = self.emb_state(seq) #.repeat(oligo,1,1)
