@@ -55,6 +55,8 @@ class PositionalEncoding2D(nn.Module):
     
     def forward(self, idx):
         B, L = idx.shape[:2]
+        bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
+
         # Calculate wrapped relative positions for cyclic peptides
         wrapped_relative_positions = calculate_wrapped_relative_positions(L, self.minpos, self.maxpos)
         # Bucketize relative positions
@@ -127,6 +129,7 @@ class MSA_emb(nn.Module):
         #   - pair: Initial Pair embedding (B, L, L, d_pair)
 
         B, N, L = msa.shape[:3] # number of sequenes in MSA
+        bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
 
         # msa embedding 
         msa = self.emb(msa) # (B, N, L, d_model) # MSA embedding
